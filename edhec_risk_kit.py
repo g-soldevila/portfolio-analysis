@@ -230,9 +230,6 @@ def sharpe_ratio(s, risk_free_rate, periods_per_year, v=None):
         # return of the portfolio and v to be the single (already annualized) volatility. 
         return (s - risk_free_rate) / v
 
-def resample_returns(rets, period="M"):
-    rets = rets.resample(period).apply(compound).to_period(period)
-    return rets
 
 # ---------------------------------------------------------------------------------
 # Modern Portfolio Theory 
@@ -511,3 +508,103 @@ def weigths_max_sharpe_ratio(covmat, mu_exc, scale=True):
         # normalize weigths
         w = w/sum(w) 
     return w
+
+# ---------------------------------------------------------------------------------
+# Factor and Style analysis 
+# ---------------------------------------------------------------------------------
+def linear_regression(dep_var, exp_vars, alpha=True):
+    '''
+    Runs a linear regression to decompose the dependent variable into the explanatory variables 
+    using statsmodels OLS method. 
+    It returns the object of type statsmodel's RegressionResults on which we can call on it:
+    - .summary() to print a full summary
+    - .params for the coefficients
+    - .tvalues and .pvalues for the significance levels
+    - .rsquared_adj and .rsquared for quality of fit
+    Note that exp.vars can be both a pd.DataFrame a np.array.
+    '''
+    if alpha:
+        # the OLS methods assume a bias equal to 0, hence a specific variable for the bias has to be given
+        if isinstance(exp_vars,pd.DataFrame):
+            exp_vars = exp_vars.copy()
+            exp_vars["Alpha"] = 1
+        else:
+            exp_vars = np.concatenate( (exp_vars, np.ones((exp_vars.shape[0],1))), axis=1 )
+    return sm.OLS(dep_var, exp_vars).fit()
+
+def capm_betas(ri, rm):
+    '''
+    Returns the CAPM factor exposures beta for each asset in the ri pd.DataFrame, 
+    where rm is the pd.DataFrame (or pd.Series) of the market return (not excess return).
+    The betas are defined as:
+      beta_i = Cov(r_i, rm) / Var(rm)
+    with r_i being the ith column (i.e., asset) of DataFrame ri.
+    '''
+    market_var = ( rm.std()**2 )[0]
+    betas = []
+    for name in ri.columns:
+        cov_im = pd.concat( [ri[name],rm], axis=1).cov().iloc[0,1]
+        betas.append( cov_im / market_var )
+    return pd.Series(betas, index=ri.columns)
+
+def tracking_error(r_a, r_b):
+    '''
+    Returns the tracking error between two return series. 
+    This method is used in Sharpe Analysis minimization problem.
+    See STYLE_ANALYSIS method.
+    '''
+    return ( ((r_a - r_b)**2).sum() )**(0.5)
+
+def style_analysis_tracking_error(weights, ref_r, bb_r):
+    '''
+    Sharpe style analysis objective function.
+    Returns the tracking error between the reference returns
+    and a portfolio of building block returns held with given weights. 
+    '''
+    return tracking_error(ref_r, (weights*bb_r).sum(axis=1))
+
+def style_analysis(dep_var, exp_vars):
+    '''
+    Sharpe style analysis optimization problem.
+    Returns the optimal weights that minimizes the tracking error between a portfolio 
+    of the explanatory (return) variables and the dependent (return) variable.
+    '''
+    # dep_var is expected to be a pd.Series
+    if isinstance(dep_var,pd.DataFrame):
+        dep_var = dep_var[dep_var.columns[0]]
+    
+    n = exp_vars.shape[1]
+    init_guess = np.repeat(1/n, n)
+    weights_const = {
+        'type': 'eq',
+        'fun': lambda weights: 1 - np.sum(weights)
+    }
+    solution = minimize(style_analysis_tracking_error, 
+                        init_guess,
+                        method='SLSQP',
+                        options={'disp': False},
+                        args=(dep_var, exp_vars),
+                        constraints=(weights_const,),
+                        bounds=((0.0, 1.0),)*n)
+    weights = pd.Series(solution.x, index=exp_vars.columns)
+    return weights
+
+# ---------------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------------
+
+def resample_returns(rets, period="M"):
+    rets = rets.resample(period).apply(compound).to_period(period)
+    return rets
+
+def get_max_compatible_date_range(p1, p2):
+    '''
+    Gets max compatible date range from 2 dataframes
+    '''
+    p1_min = p1.index.min()
+    p1_max = p1.index.max()
+    
+    p2_min = p2.index.min()
+    p2_max = p2.index.max()
+    
+    return [max([p1_min, p2_min]), min([p1_max, p2_max])]
