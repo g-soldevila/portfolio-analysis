@@ -39,4 +39,4 @@ def get_ff_path(name, daily=False):
     return format_ff_path(filePath, name, daily, "csv")
                           
 def get_ff_factors(name, daily=False):
-    return pd.read_csv(get_ff_path(name, daily), index_col=0, parse_dates=True, na_values=-99.99)
+    return pd.read_csv(get_ff_path(name, daily), index_col=0, parse_dates=True, na_values=-99.99) / 100

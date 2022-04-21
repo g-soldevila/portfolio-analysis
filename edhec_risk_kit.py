@@ -512,6 +512,7 @@ def weigths_max_sharpe_ratio(covmat, mu_exc, scale=True):
 # ---------------------------------------------------------------------------------
 # Factor and Style analysis 
 # ---------------------------------------------------------------------------------
+
 def linear_regression(dep_var, exp_vars, alpha=True):
     '''
     Runs a linear regression to decompose the dependent variable into the explanatory variables 
@@ -588,6 +589,157 @@ def style_analysis(dep_var, exp_vars):
                         bounds=((0.0, 1.0),)*n)
     weights = pd.Series(solution.x, index=exp_vars.columns)
     return weights
+
+def sample_cov(r, **kwargs):
+    '''
+    Returns the sample covariance of the supplied series of returns (a pd.DataFrame) 
+    '''
+    if not isinstance(r,pd.DataFrame):
+        raise ValueError("Expected r to be a pd.DataFrame of returns series")
+    return r.cov()
+
+def cc_cov(r, **kwargs):
+    '''
+    Estimates a covariance matrix by using the Elton/Gruber Constant Correlation model
+    '''
+    # correlation coefficents  
+    rhos = r.corr()
+    n = rhos.shape[0]
+    # compute the mean correlation: since the matrix rhos is a symmetric with diagonals all 1, 
+    # the mean correlation can be computed by:
+    mean_rho = (rhos.values.sum() - n) / (n**2-n) 
+    # create the constant correlation matrix containing 1 on the diagonal and the mean correlation outside
+    ccor = np.full_like(rhos, mean_rho)
+    np.fill_diagonal(ccor, 1.)
+    # create the new covariance matrix by multiplying mean_rho*std_i*std_i 
+    # the product of the stds is done via np.outer
+    ccov = ccor * np.outer(r.std(), r.std())
+    return pd.DataFrame(ccov, index=r.columns, columns=r.columns)
+
+def factor_model_cov(r, factors=None, **kwargs):
+    
+    # Get a slice of the factor data with the same date range as r
+    factors = factors[r.index.min(): r.index.max()]
+    r = r[r.index.min(): r.index.max()]
+    
+    n_assets = r.shape[1]
+    m = np.zeros(shape=(n_assets,n_assets))
+    
+    factors_cov = factors.cov()
+         
+    for i in range(n_assets):
+        for j in range(n_assets):
+            i_betas = linear_regression(r.iloc[:,i], factors, alpha=False).params
+            j_betas = linear_regression(r.iloc[:,j], factors, alpha=False).params
+            m[i][j] = np.dot(np.dot(i_betas.to_numpy(),factors_cov), np.array([j_betas]).T)
+                        
+    return m
+
+def shrinkage_cov(r, delta=0.5, **kwargs):
+    '''
+    Statistical shrinkage: it returns a covariance matrix estimator that shrinks between 
+    the constant correlation and standard sample covariance estimators 
+    '''
+    samp_cov  = sample_cov(r, **kwargs)
+    const_cov = cc_cov(r, **kwargs)
+    return delta*const_cov + (1-delta)*samp_cov
+
+# ---------------------------------------------------------------------------------
+# Back-test weigthing schemes
+# ---------------------------------------------------------------------------------
+
+def weight_ew(r, cap_ws=None, max_cw_mult=None, microcap_thr=None, **kwargs):
+    """
+    Returns the weights of the Equally-Weighted (EW) portfolio based on the asset returns "r" as a DataFrame. 
+    If the set of cap_ws is given, the modified scheme is computed, i.e., 
+    microcaps are removed and a capweight tether applied.
+    """
+    ew = pd.Series(1/len(r.columns), index=r.columns)
+    if cap_ws is not None:
+        cw = cap_ws.loc[r.index[0]] # starting cap weight
+        if microcap_thr is not None and microcap_thr > 0.0:
+            # exclude microcaps according to the threshold    
+            ew[ cw < microcap_thr ] = 0
+            ew = ew / ew.sum()
+        if max_cw_mult is not None and max_cw_mult > 0:
+            # limit weight up to a multiple of capweight
+            ew = np.minimum(ew, cw*max_cw_mult)
+            ew = ew / ew.sum()
+    return ew
+
+def weight_cw(r, cap_ws, **kwargs):
+    '''
+    Returns the weights of the Cap-Weigthed (CW) portfolio based on the time series of capweights
+    '''
+    return cap_ws.loc[r.index[0]]
+    # which is equal to:
+    # w = cap_ws.loc[r.index[0]]
+    # return w / w.sum()
+    # since cap_ws are already normalized
+    
+def weight_constant_cap(r, cap_ws, **kwargs):
+    '''
+    Returns the weights of the Cap-Weigthed (CW) portfolio based on constant capweights
+    '''
+    return cap_ws / cap_ws.sum()
+    
+def weight_rp(r, cov_estimator=sample_cov, **kwargs):
+    '''
+    Produces the weights of the risk parity portfolio given a covariance matrix of the returns.
+    The default coavariance estimator is the sample covariance matrix.
+    '''
+    est_cov = cov_estimator(r, **kwargs)
+    return risk_parity_weigths(est_cov)  
+
+def backtest_weight_scheme(r, window=36, weight_scheme=weight_ew, **kwargs):
+    '''
+    Backtests a given weighting scheme. Here:
+    - r: asset returns to use to build the portfolio
+    - window: the rolling window used
+    - weight_scheme: the weighting scheme to use, it must the name of a 
+    method that takes "r", and a variable number of keyword-value arguments
+    '''
+    n_periods = r.shape[0]
+    windows = [ (start, start+window) for start in range(0,n_periods-window) ]
+    weights = [ weight_scheme( r.iloc[win[0]:win[1]], **kwargs) for win in windows ]
+    weights = pd.DataFrame(weights, index=r.iloc[window:].index, columns=r.columns)    
+    returns = (weights * r).sum(axis=1,  min_count=1) #mincount is to generate NAs if all inputs are NAs
+    return returns, weights
+
+def annualize_vol_ewa(r, decay=0.95, periods_per_year=12):
+    '''
+    Computes the annualized exponentially weighted average volatility of a 
+    series of returns given a decay (smoothing) factor in input. 
+    '''
+    N = r.shape[0]
+    times = np.arange(0,N,1)
+    # compute the square error returns
+    sq_errs = pd.DataFrame( ( r - r.mean() )**2 )
+    # exponential weights
+    weights = [ decay**(N-t) for t in times ] / np.sum(decay**(N-times))
+    weights = pd.DataFrame(weights, index=r.index)
+    # EWA
+    vol_ewa = (weights * sq_errs).sum()**(0.5)
+    # Annualize the computed volatility
+    ann_vol_ewa = vol_ewa[0] * np.sqrt(periods_per_year)
+    return ann_vol_ewa
+
+def weight_minvar(r, cov_estimator=sample_cov, periods_per_year=12, **kwargs):
+    '''
+    Produces the weights of the Minimum Volatility Portfolio given a covariance matrix of the returns 
+    '''
+    est_cov = cov_estimator(r, **kwargs)
+    ann_ret = annualize_rets(r, periods_per_year=12)
+    return minimize_volatility(ann_ret, est_cov)
+
+def weight_maxsharpe(r, cov_estimator=sample_cov, periods_per_year=12, risk_free_rate=0.03, **kwargs):
+    '''
+    Produces the weights of the Maximum Sharpe Ratio Portfolio given a covariance matrix of the returns 
+    '''
+    est_cov = cov_estimator(r, **kwargs)
+    ann_ret = annualize_rets(r, periods_per_year=12)
+    return maximize_shape_ratio(ann_ret, est_cov, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
+    
 
 # ---------------------------------------------------------------------------------
 # Helpers
