@@ -616,12 +616,9 @@ def cc_cov(r, **kwargs):
     ccov = ccor * np.outer(r.std(), r.std())
     return pd.DataFrame(ccov, index=r.columns, columns=r.columns)
 
-def factor_model_cov(r, factors=None, **kwargs):
-    
-    # Get a slice of the factor data with the same date range as r
-    factors = factors[r.index.min(): r.index.max()]
-    r = r[r.index.min(): r.index.max()]
-    
+def factor_model_cov(r, factors=None, risk_free=None, **kwargs):    
+    # Get a slice of the factor data with the same date range as r    
+    r, factors, risk_free = adjust_date_indexes([r, factors, risk_free])
     n_assets = r.shape[1]
     m = np.zeros(shape=(n_assets,n_assets))
     
@@ -629,9 +626,9 @@ def factor_model_cov(r, factors=None, **kwargs):
          
     for i in range(n_assets):
         for j in range(n_assets):
-            i_betas = linear_regression(r.iloc[:,i], factors, alpha=False).params
-            j_betas = linear_regression(r.iloc[:,j], factors, alpha=False).params
-            m[i][j] = np.dot(np.dot(i_betas.to_numpy(),factors_cov), np.array([j_betas]).T)
+            i_betas = linear_regression(r.iloc[:,i] - risk_free, factors, alpha=False).params
+            j_betas = linear_regression(r.iloc[:,j] - risk_free, factors, alpha=False).params
+            m[i][j] = i_betas.to_numpy() @ factors_cov @ np.array([j_betas]).T
                         
     return m
 
@@ -672,16 +669,6 @@ def weight_cw(r, cap_ws, **kwargs):
     Returns the weights of the Cap-Weigthed (CW) portfolio based on the time series of capweights
     '''
     return cap_ws.loc[r.index[0]]
-    # which is equal to:
-    # w = cap_ws.loc[r.index[0]]
-    # return w / w.sum()
-    # since cap_ws are already normalized
-    
-def weight_constant_cap(r, cap_ws, **kwargs):
-    '''
-    Returns the weights of the Cap-Weigthed (CW) portfolio based on constant capweights
-    '''
-    return cap_ws / cap_ws.sum()
     
 def weight_rp(r, cov_estimator=sample_cov, **kwargs):
     '''
@@ -742,21 +729,64 @@ def weight_maxsharpe(r, cov_estimator=sample_cov, periods_per_year=12, risk_free
     
 
 # ---------------------------------------------------------------------------------
-# Helpers
+# Helpers for working with DataFrames
 # ---------------------------------------------------------------------------------
+
+# Derived fields
+# --------------
+
+def get_market_caps(portfolio_returns, porfolio_info, normalized=True):
+    portfolio_market_caps = pd.DataFrame()
+    portfolio_market_caps.index = portfolio_returns.index
+
+    for ticker in portfolio_returns.columns:
+
+        ticker_market_cap = porfolio_info["marketCap"][ticker]
+        ticker_returns = portfolio_returns[ticker]
+
+        marketCaps = [ticker_market_cap]
+        previous_cap = ticker_market_cap
+
+        reversed_returns = ticker_returns[::-1][:-1]
+        for r in reversed_returns:
+            c = previous_cap/(1 + r)
+            marketCaps.append(c)
+            previous_cap = c
+
+        portfolio_market_caps[ticker] = marketCaps[::-1]
+        
+    if normalized:
+        return normalize_market_caps(portfolio_market_caps)
+        
+    return portfolio_market_caps
+
+def normalize_market_caps(market_caps):
+    return market_caps.div(market_caps.sum(axis=1), axis=0)
+
+# Working with dates
+# ------------------
 
 def resample_returns(rets, period="M"):
     rets = rets.resample(period).apply(compound).to_period(period)
     return rets
 
-def get_max_compatible_date_range(p1, p2):
+def resample_market_caps(market_caps, period="M"):
+    market_caps = market_caps.resample(period).last().to_period(period)
+    return market_caps
+
+def get_max_compatible_date_range(df_array):
     '''
     Gets max compatible date range from 2 dataframes
     '''
-    p1_min = p1.index.min()
-    p1_max = p1.index.max()
+    mins = []
+    maxs = []
     
-    p2_min = p2.index.min()
-    p2_max = p2.index.max()
+    for df in df_array:
+        mins.append(df.index.min())
+        maxs.append(df.index.max())
     
-    return [max([p1_min, p2_min]), min([p1_max, p2_max])]
+    return [max(mins), min(maxs)]
+
+def adjust_date_indexes(df_array):    
+    max_date_range = get_max_compatible_date_range(df_array)
+    return [df[max_date_range[0]:max_date_range[1]] for df in df_array]

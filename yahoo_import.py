@@ -99,7 +99,7 @@ def read_portfolio(portfolio_name, path="data/yahoo_data/portfolio"):
     df = pd.read_csv(file_path, index_col=0)
     
     info_file_path = f'{path}/{portfolio_name}_info.csv'
-    if exists(file_path):
+    if exists(info_file_path):
         info = read_portfolio_info(portfolio_name, path=path)
         df = pd.concat([df, info], axis=1, join="inner")
         
